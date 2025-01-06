@@ -10,7 +10,7 @@ use crate::patches::{PatchLog, TextRepresentation};
 use crate::sync::SyncDoc;
 use crate::transaction::{CommitOptions, Transactable};
 use crate::types::Clock;
-use crate::{hydrate, OnPartialLoad};
+use crate::{hydrate, OnPartialLoad, TextEncoding};
 use crate::{sync, ObjType, Parents, Patch, ReadDoc, ScalarValue};
 use crate::{
     transaction::TransactionInner, ActorId, Automerge, AutomergeError, Change, ChangeHash, Cursor,
@@ -69,10 +69,12 @@ pub struct AutoCommit {
 /// See [`AutoCommit`]
 impl Default for AutoCommit {
     fn default() -> Self {
+        let doc = Automerge::new();
+        let text_rep = doc.text_encoding().into();
         AutoCommit {
             doc: Automerge::new(),
             transaction: None,
-            patch_log: PatchLog::inactive(TextRepresentation::default()),
+            patch_log: PatchLog::inactive(text_rep),
             diff_cursor: Vec::new(),
             diff_cache: None,
             save_cursor: Vec::new(),
@@ -86,12 +88,27 @@ impl AutoCommit {
         AutoCommit::default()
     }
 
+    pub fn new_with_encoding(encoding: TextEncoding) -> AutoCommit {
+        let doc = Automerge::new_with_encoding(encoding);
+        let text_rep = doc.text_encoding().into();
+        AutoCommit {
+            doc,
+            transaction: None,
+            patch_log: PatchLog::inactive(text_rep),
+            diff_cursor: Vec::new(),
+            diff_cache: None,
+            save_cursor: Vec::new(),
+            isolation: None,
+        }
+    }
+
     pub fn load(data: &[u8]) -> Result<Self, AutomergeError> {
         let doc = Automerge::load(data)?;
+        let text_encoding = doc.text_encoding();
         Ok(Self {
             doc,
             transaction: None,
-            patch_log: PatchLog::inactive(TextRepresentation::default()),
+            patch_log: PatchLog::inactive(text_encoding.into()),
             diff_cursor: Vec::new(),
             diff_cache: None,
             save_cursor: Vec::new(),
@@ -101,10 +118,11 @@ impl AutoCommit {
 
     pub fn load_unverified_heads(data: &[u8]) -> Result<Self, AutomergeError> {
         let doc = Automerge::load_unverified_heads(data)?;
+        let text_encoding = doc.text_encoding();
         Ok(Self {
             doc,
             transaction: None,
-            patch_log: PatchLog::inactive(TextRepresentation::default()),
+            patch_log: PatchLog::inactive(text_encoding.into()),
             diff_cursor: Vec::new(),
             diff_cache: None,
             save_cursor: Vec::new(),
@@ -131,10 +149,11 @@ impl AutoCommit {
         options: LoadOptions<'_>,
     ) -> Result<Self, AutomergeError> {
         let doc = Automerge::load_with_options(data, options)?;
+        let text_encoding = doc.text_encoding();
         Ok(Self {
             doc,
             transaction: None,
-            patch_log: PatchLog::inactive(TextRepresentation::default()),
+            patch_log: PatchLog::inactive(text_encoding.into()),
             diff_cursor: Vec::new(),
             diff_cache: None,
             save_cursor: Vec::new(),
@@ -146,7 +165,7 @@ impl AutoCommit {
     /// longer indexes changes to the document.
     pub fn reset_diff_cursor(&mut self) {
         self.ensure_transaction_closed();
-        self.patch_log = PatchLog::inactive(TextRepresentation::default());
+        self.patch_log = PatchLog::inactive(self.doc.text_encoding().into());
         self.diff_cursor = Vec::new();
     }
 
@@ -833,6 +852,10 @@ impl ReadDoc for AutoCommit {
 
     fn stats(&self) -> crate::read::Stats {
         self.doc.stats()
+    }
+
+    fn text_encoding(&self) -> crate::TextEncoding {
+        self.doc.text_encoding()
     }
 }
 

@@ -9,7 +9,7 @@ use crate::op_set::{ChangeOpIter, OpIdx, OpIdxRange};
 use crate::patches::{PatchLog, TextRepresentation};
 use crate::query::{self, OpIdSearch};
 use crate::storage::Change as StoredChange;
-use crate::types::{Clock, Key, ListEncoding, ObjMeta, OpId};
+use crate::types::{Clock, Key, ListEncoding, ObjMeta, OpId, TextEncoding};
 use crate::{op_tree::OpSetData, types::OpBuilder, Automerge, Change, ChangeHash, Prop};
 use crate::{AutomergeError, ObjType, OpType, ReadDoc, ScalarValue};
 
@@ -23,6 +23,7 @@ pub(crate) struct TransactionInner {
     deps: Vec<ChangeHash>,
     scope: Option<Clock>,
     idx_range: OpIdxRange,
+    text_encoding: TextEncoding,
 }
 
 /// Arguments required to create a new transaction
@@ -40,6 +41,8 @@ pub(crate) struct TransactionArgs {
     pub(crate) deps: Vec<ChangeHash>,
     /// The scope that should be visible to the transaction
     pub(crate) scope: Option<Clock>,
+    /// How text indices should be calculated
+    pub(crate) text_encoding: TextEncoding,
 }
 
 impl TransactionInner {
@@ -51,6 +54,7 @@ impl TransactionInner {
             idx_range,
             deps,
             scope,
+            text_encoding,
         }: TransactionArgs,
     ) -> Self {
         TransactionInner {
@@ -62,6 +66,7 @@ impl TransactionInner {
             idx_range,
             deps,
             scope,
+            text_encoding,
         }
     }
 
@@ -457,9 +462,14 @@ impl TransactionInner {
         action: OpType,
     ) -> Result<Option<OpIdx>, AutomergeError> {
         let osd = doc.osd();
+        let encoding = match obj.typ {
+            ObjType::List => ListEncoding::List,
+            ObjType::Text => patch_log.text_rep().encoding(obj.typ),
+            other => return Err(AutomergeError::InvalidOp(other)),
+        };
         let query = doc.ops().search(
             &obj.id,
-            query::Nth::new(index, ListEncoding::List, self.scope.clone(), osd),
+            query::Nth::new(index, encoding, self.scope.clone(), osd),
         );
 
         let id = self.next_id();
@@ -624,7 +634,7 @@ impl TransactionInner {
         }
 
         //let ex_obj = doc.ops().id_to_exid(obj.0);
-        let encoding = splice_type.encoding();
+        let encoding = splice_type.encoding(self.text_encoding);
         // delete `del` items - performing the query for each one
         let mut deleted: usize = 0;
         while deleted < (del as usize) {
@@ -698,7 +708,7 @@ impl TransactionInner {
             if patch_log.is_active() {
                 match splice_type {
                     SpliceType::Text(text)
-                        if matches!(patch_log.text_rep(), TextRepresentation::String) =>
+                        if matches!(patch_log.text_rep(), TextRepresentation::String(_)) =>
                     {
                         patch_log.splice(obj.id, index, text, marks);
                     }
@@ -706,7 +716,9 @@ impl TransactionInner {
                         let mut opid = self.next_id().minus(values.len());
                         for (offset, v) in values.iter().enumerate() {
                             opid = opid.next();
-                            patch_log.insert(obj.id, index + offset, v.clone().into(), opid, false);
+                            let hydrated =
+                                crate::hydrate::Value::new(v.clone(), patch_log.text_rep());
+                            patch_log.insert(obj.id, index + offset, hydrated, opid, false);
                         }
                     }
                 }
@@ -922,12 +934,16 @@ impl TransactionInner {
                     match (obj.typ, prop) {
                         (ObjType::List, Prop::Seq(index)) => {
                             //let value = (op.value(), doc.ops().id_to_exid(op.id));
-                            patch_log.insert(obj.id, index, op.value().into(), *op.id(), false);
+                            let value =
+                                crate::hydrate::Value::new(op.value(), patch_log.text_rep());
+                            patch_log.insert(obj.id, index, value, *op.id(), false);
                         }
                         (ObjType::Text, Prop::Seq(index)) => {
                             if matches!(patch_log.text_rep(), TextRepresentation::Array) {
                                 //let value = (op.value(), doc.ops().id_to_exid(op.id));
-                                patch_log.insert(obj.id, index, op.value().into(), *op.id(), false);
+                                let value =
+                                    crate::hydrate::Value::new(op.value(), patch_log.text_rep());
+                                patch_log.insert(obj.id, index, value, *op.id(), false);
                             } else {
                                 patch_log.splice(obj.id, index, op.as_str(), marks);
                             }
@@ -943,7 +959,8 @@ impl TransactionInner {
             } else if let Some(value) = op.get_increment_value() {
                 patch_log.increment(obj.id, &prop, value, *op.id());
             } else {
-                patch_log.put(obj.id, &prop, op.value().into(), *op.id(), false, false);
+                let value = crate::hydrate::Value::new(op.value(), patch_log.text_rep());
+                patch_log.put(obj.id, &prop, value, *op.id(), false, false);
             }
         }
     }
@@ -1144,10 +1161,10 @@ enum SpliceType<'a> {
 }
 
 impl<'a> SpliceType<'a> {
-    fn encoding(&self) -> ListEncoding {
+    fn encoding(&self, text_encoding: TextEncoding) -> ListEncoding {
         match self {
             SpliceType::List => ListEncoding::List,
-            SpliceType::Text(_) => ListEncoding::Text,
+            SpliceType::Text(_) => ListEncoding::Text(text_encoding),
         }
     }
 }
